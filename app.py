@@ -3,19 +3,20 @@ import re
 from flask import Flask, request
 import telebot
 
+# 1. Token и admin id из env
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
 bot = telebot.TeleBot(TOKEN)
 app = Flask(__name__)
 
-# simple in-memory storage for user emails
-# ["user1@example.com", "user2@example.com", ...]
-emails = []
+# 2. In-memory storage
+emails = []  # ["user@example.com", ...]
 
 email_regex = re.compile(r"[^@ \t\r\n]+@[^@ \t\r\n]+\.[^@ \t\r\n]+")
 
 
+# 3. Handlers
 @bot.message_handler(commands=['start'])
 def start(message):
     bot.reply_to(message, "Hi! Please send your email to participate.")
@@ -46,7 +47,6 @@ def send_all_emails(message):
         bot.send_message(ADMIN_ID, "There are no emails yet.")
         return
 
-    # format: 1 - mail@example.com
     lines = [f"{i} - {mail}" for i, mail in enumerate(emails, start=1)]
     text = "\n".join(lines)
 
@@ -64,11 +64,12 @@ def clear_emails(message):
         return  # only admin can use this command
 
     global emails
-    emails = []  # reset in-memory storage
+    emails = []
 
     bot.send_message(ADMIN_ID, "All collected emails have been cleared.")
 
 
+# 4. Flask routes
 @app.route("/", methods=["GET"])
 def index():
     return "Bot is running", 200
@@ -82,7 +83,7 @@ def webhook():
     return "OK", 200
 
 
+# 5. Local debug (не используется на Render, но не мешает)
 if __name__ == "__main__":
-    # local debug: polling mode
     print("Bot is running in polling mode...")
     bot.infinity_polling()
