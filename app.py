@@ -87,3 +87,11 @@ def webhook():
 if __name__ == "__main__":
     print("Bot is running in polling mode...")
     bot.infinity_polling()
+
+@app.route(f"/{TOKEN}", methods=["POST"])
+def webhook():
+    print("=== GOT UPDATE FROM TELEGRAM ===")
+    json_str = request.get_data().decode("utf-8")
+    update = telebot.types.Update.de_json(json_str)
+    bot.process_new_updates([update])
+    return "OK", 200
