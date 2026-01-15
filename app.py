@@ -25,6 +25,7 @@ lock = asyncio.Lock()
 
 
 def get_db_connection():
+    # подключение к Postgres на Render
     return psycopg2.connect(DATABASE_URL)
 
 
@@ -59,7 +60,9 @@ async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     email = update.message.text.strip().lower()
 
     if "@" not in email:
-        await update.message.reply_text("This doesn't look like a valid email. Please try again.")
+        await update.message.reply_text(
+            "This doesn't look like a valid email. Please try again."
+        )
         return
 
     async with lock:
@@ -152,6 +155,27 @@ async def export_participants(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(text[i : i + chunk_size])
 
 
+async def reset_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # полный сброс таблицы participants с обнулением ID
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("This command is only available to the admin.")
+        return
+
+    async with lock:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("TRUNCATE TABLE participants RESTART IDENTITY;")
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    await update.message.reply_text(
+        "All participants have been removed.\n"
+        "ID counter has been reset. New participants will start from 001 again."
+    )
+
+
 async def handle_webhook(request: web.Request):
     # вебхук — приём апдейтов от Telegram
     from telegram import Update as TgUpdate
@@ -193,6 +217,7 @@ def create_web_app() -> web.Application:
     )
     application.add_handler(CommandHandler("raffle", raffle))
     application.add_handler(CommandHandler("export", export_participants))
+    application.add_handler(CommandHandler("reset", reset_participants))
 
     web_app = web.Application()
     web_app["application"] = application
