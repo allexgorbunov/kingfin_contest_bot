@@ -2,6 +2,7 @@ import os
 import asyncio
 import logging
 import random
+from difflib import SequenceMatcher
 
 from aiohttp import web
 import psycopg2
@@ -68,6 +69,38 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Welcome to the giveaway!\n"
         "Send your email to participate and get a unique number like 001, 002, 003."
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # помощь — команды только для админа
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        # Обычные пользователи не видят команды админа
+        await update.message.reply_text(
+            "Welcome to the giveaway!\n"
+            "Send your email to participate and get a unique number."
+        )
+        return
+
+    # Список команд для админа
+    help_text = (
+        "🔧 Admin Commands:\n\n"
+        "📋 Management:\n"
+        "• /list - Show all participants with IDs\n"
+        "• /export - Export participants list\n"
+        "• /check_duplicates - Find suspicious duplicate emails\n"
+        "• /remove <number> - Remove participant by number\n"
+        "• /remove <email> - Remove participant by email\n\n"
+        "🎲 Raffle:\n"
+        "• /raffle - Run the giveaway and select a winner\n\n"
+        "🔄 Reset:\n"
+        "• /reset - Clear all participants and reset counter\n\n"
+        "ℹ️ Info:\n"
+        "• /start - Start message\n"
+        "• /help - Show this help"
+    )
+    
+    await update.message.reply_text(help_text)
 
 
 async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -218,6 +251,154 @@ async def reset_participants(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 
+def similarity(a: str, b: str) -> float:
+    """Вычисляет схожесть двух строк (0.0 - 1.0)"""
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+async def check_duplicates(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # проверка на похожие email-адреса (дубликаты)
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("This command is only available to the admin.")
+        return
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, number, email FROM participants ORDER BY id;")
+    participants = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if len(participants) < 2:
+        await update.message.reply_text("Not enough participants to check for duplicates.")
+        return
+
+    # Ищем похожие email-адреса
+    duplicates_found = []
+    threshold = 0.7  # порог схожести (70%)
+
+    for i, (id1, num1, email1) in enumerate(participants):
+        # Извлекаем локальную часть email (до @)
+        local1 = email1.split("@")[0] if "@" in email1 else email1
+        
+        for j, (id2, num2, email2) in enumerate(participants[i + 1:], start=i + 1):
+            local2 = email2.split("@")[0] if "@" in email2 else email2
+            
+            # Проверяем схожесть локальных частей
+            sim = similarity(local1, local2)
+            
+            # Также проверяем одинаковый домен
+            domain1 = email1.split("@")[1] if "@" in email1 else ""
+            domain2 = email2.split("@")[1] if "@" in email2 else ""
+            
+            if sim >= threshold or (domain1 == domain2 and sim >= 0.5):
+                duplicates_found.append({
+                    "id1": id1, "num1": num1, "email1": email1,
+                    "id2": id2, "num2": num2, "email2": email2,
+                    "similarity": sim
+                })
+
+    if not duplicates_found:
+        await update.message.reply_text("No suspicious duplicates found. ✅")
+        return
+
+    # Формируем сообщение с найденными дубликатами
+    message = "⚠️ Suspicious duplicates found:\n\n"
+    for dup in duplicates_found:
+        message += (
+            f"• {dup['num1']} ({dup['email1']})\n"
+            f"  {dup['num2']} ({dup['email2']})\n"
+            f"  Similarity: {dup['similarity']:.1%}\n\n"
+        )
+    
+    message += f"Use /remove <number> to delete a participant."
+
+    # Разбиваем на части, если сообщение слишком длинное
+    chunk_size = 4000
+    for i in range(0, len(message), chunk_size):
+        await update.message.reply_text(message[i : i + chunk_size])
+
+
+async def remove_participant(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # удаление участника по номеру или email
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("This command is only available to the admin.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /remove <number> or /remove <email>\n"
+            "Example: /remove 001 or /remove user@example.com"
+        )
+        return
+
+    identifier = " ".join(context.args).strip().lower()
+
+    async with lock:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # Пытаемся найти по номеру или email
+        cur.execute(
+            "SELECT id, number, email FROM participants WHERE number = %s OR LOWER(email) = %s",
+            (identifier, identifier)
+        )
+        participant = cur.fetchone()
+
+        if not participant:
+            cur.close()
+            conn.close()
+            await update.message.reply_text(
+                f"Participant not found: {identifier}\n"
+                f"Use /export to see the list of participants."
+            )
+            return
+
+        part_id, part_number, part_email = participant
+
+        # Удаляем участника
+        cur.execute("DELETE FROM participants WHERE id = %s", (part_id,))
+        conn.commit()
+        cur.close()
+        conn.close()
+
+    await update.message.reply_text(
+        f"✅ Participant removed:\n"
+        f"Number: {part_number}\n"
+        f"Email: {part_email}"
+    )
+
+
+async def list_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # список участников с ID для удобства удаления
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("This command is only available to the admin.")
+        return
+
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT id, number, email FROM participants ORDER BY id;")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not rows:
+        await update.message.reply_text("The participants list is empty.")
+        return
+
+    # Вывод с ID для удобства
+    lines = [f"ID:{id} | {number} - {email}" for id, number, email in rows]
+    text = "Participants list (use /remove <number> to delete):\n\n" + "\n".join(lines)
+
+    # Разбиваем на части, если текст очень длинный
+    chunk_size = 4000
+    for i in range(0, len(text), chunk_size):
+        await update.message.reply_text(text[i : i + chunk_size])
+
+
 async def handle_webhook(request: web.Request):
     # вебхук — приём апдейтов от Telegram
     from telegram import Update as TgUpdate
@@ -254,12 +435,16 @@ def create_web_app() -> web.Application:
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, handle_email)
     )
     application.add_handler(CommandHandler("raffle", raffle))
     application.add_handler(CommandHandler("export", export_participants))
+    application.add_handler(CommandHandler("list", list_participants))
     application.add_handler(CommandHandler("reset", reset_participants))
+    application.add_handler(CommandHandler("check_duplicates", check_duplicates))
+    application.add_handler(CommandHandler("remove", remove_participant))
 
     web_app = web.Application()
     web_app["application"] = application
