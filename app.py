@@ -38,8 +38,23 @@ async def init_db():
         CREATE TABLE IF NOT EXISTS participants (
             id SERIAL PRIMARY KEY,
             email TEXT UNIQUE NOT NULL,
-            number TEXT UNIQUE NOT NULL
+            number TEXT UNIQUE NOT NULL,
+            chat_id BIGINT NOT NULL
         );
+        """
+    )
+    # Добавляем колонку chat_id, если её ещё нет (для существующих БД)
+    cur.execute(
+        """
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='participants' AND column_name='chat_id'
+            ) THEN
+                ALTER TABLE participants ADD COLUMN chat_id BIGINT;
+            END IF;
+        END $$;
         """
     )
     conn.commit()
@@ -68,12 +83,19 @@ async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with lock:
         conn = get_db_connection()
         cur = conn.cursor()
+        chat_id = update.effective_chat.id
 
         # если уже участвует — просто показываем ранее выданный номер
         cur.execute("SELECT number FROM participants WHERE email = %s", (email,))
         row = cur.fetchone()
         if row:
             number = row[0]
+            # Обновляем chat_id на случай, если пользователь пишет из другого чата
+            cur.execute(
+                "UPDATE participants SET chat_id = %s WHERE email = %s",
+                (chat_id, email),
+            )
+            conn.commit()
             cur.close()
             conn.close()
             await update.message.reply_text(
@@ -89,8 +111,8 @@ async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
         number = f"{next_id:03d}"  # 001, 002, 010, 123
 
         cur.execute(
-            "INSERT INTO participants (email, number) VALUES (%s, %s)",
-            (email, number),
+            "INSERT INTO participants (email, number, chat_id) VALUES (%s, %s, %s)",
+            (email, number, chat_id),
         )
         conn.commit()
         cur.close()
@@ -112,17 +134,37 @@ async def raffle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with lock:
         conn = get_db_connection()
         cur = conn.cursor()
-        cur.execute("SELECT number FROM participants ORDER BY id;")
-        numbers = [row[0] for row in cur.fetchall()]
+        cur.execute("SELECT number, chat_id FROM participants ORDER BY id;")
+        participants = cur.fetchall()
         cur.close()
         conn.close()
 
-    if not numbers:
+    if not participants:
         await update.message.reply_text("There are no participants yet.")
         return
 
-    winner = random.choice(numbers)
-    await update.message.reply_text(f"The winner is number {winner}!")
+    winner_data = random.choice(participants)
+    winner_number = winner_data[0]
+    winner_chat_id = winner_data[1]
+
+    # Отправляем уведомление админу
+    await update.message.reply_text(f"The winner is number {winner_number}!")
+
+    # Отправляем уведомление победителю
+    try:
+        application = context.application
+        await application.bot.send_message(
+            chat_id=winner_chat_id,
+            text=f"🎉 Congratulations! You won the giveaway!\n"
+                 f"Your winning number: {winner_number}\n"
+                 f"Please contact the administrator to claim your prize."
+        )
+    except Exception as e:
+        logging.error(f"Failed to send message to winner {winner_chat_id}: {e}")
+        await update.message.reply_text(
+            f"Winner selected: {winner_number}, but failed to send notification. "
+            f"Error: {str(e)}"
+        )
 
 
 async def export_participants(update: Update, context: ContextTypes.DEFAULT_TYPE):
